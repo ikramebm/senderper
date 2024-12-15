@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <title>Émetteur Vidéo WebRTC</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 20px auto;
+            text-align: center;
+        }
+        #localVideo {
+            max-width: 100%;
+            background-color: #f0f0f0;
+            border: 1px solid #ccc;
+        }
+        #statusMessage {
+            margin: 10px 0;
+            padding: 10px;
+            border-radius: 4px;
+        }
+        .error {
+            background-color: #ffebee;
+            color: #c62828;
+            border: 1px solid #ef9a9a;
+        }
+        .success {
+            background-color: #e8f5e9;
+            color: #2e7d32;
+            border: 1px solid #a5d6a7;
+        }
+    </style>
+</head>
+<body>
+    <h1>Émetteur de Flux Vidéo</h1>
+    <div id="statusMessage" style="display: none;"></div>
+    <div>
+        <video id="localVideo" width="640" height="480" autoplay muted></video>
+    </div>
+
+    <script>
+        const socket = new WebSocket('wss://ikrame-s-websocket-server.glitch.me');
+        const localVideo = document.getElementById('localVideo');
+        const statusMessage = document.getElementById('statusMessage');
+        let peerConnection = null;
+        let localStream = null;
+        let hasPermission = false;
+
+        const ice_servers = {
+            urls: ['turn:ikrame-s-websocket-server.glitch.me:3478'],
+            username: "admin",
+            credential: "admin"
+        };
+
+        function showMessage(message, isError = false) {
+            statusMessage.textContent = message;
+            statusMessage.style.display = 'block';
+            statusMessage.className = isError ? 'error' : 'success';
+        }
+
+        socket.onopen = () => {
+            socket.send(JSON.stringify({type: 'register-esp32'}));
+            showMessage('Connecté au serveur de signalisation', false);
+        };
+
+        async function requestCameraPermission() {
+            try {
+                await navigator.mediaDevices.getUserMedia({ video: true });
+                hasPermission = true;
+                showMessage('Autorisation de la caméra accordée', false);
+                return true;
+            } catch (error) {
+                hasPermission = false;
+                showMessage('Accès à la caméra refusé. Veuillez autoriser l\'accès à la caméra dans les paramètres de votre navigateur.', true);
+                socket.send(JSON.stringify({
+                    type: 'camera-permission-denied'
+                }));
+                return false;
+            }
+        }
+
+        async function startStream() {
+            if (!hasPermission) {
+                const permissionGranted = await requestCameraPermission();
+                if (!permissionGranted) return;
+            }
+
+            try {
+                localStream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { width: 640, height: 480 }, 
+                    audio: false 
+                });
+                
+                localVideo.srcObject = localStream;
+                showMessage('Flux vidéo démarré', false);
+
+                // Connexion WebRTC
+                peerConnection = new RTCPeerConnection({ 
+                    iceServers: [ice_servers]
+                });
+
+                localStream.getTracks().forEach(track => {
+                    peerConnection.addTrack(track, localStream);
+                });
+
+                // Préparation de l'offre
+                const offer = await peerConnection.createOffer();
+                await peerConnection.setLocalDescription(offer);
+
+                socket.send(JSON.stringify({
+                    type: 'webrtc-offer',
+                    offer: offer
+                }));
+
+                // Gestion des ICE candidates
+                peerConnection.onicecandidate = (event) => {
+                    if (event.candidate) {
+                        socket.send(JSON.stringify({
+                            type: 'webrtc-ice-candidate',
+                            candidate: event.candidate
+                        }));
+                    }
+                };
+
+            } catch (error) {
+                console.error('Erreur lors du démarrage de la caméra:', error);
+                showMessage('Erreur lors du démarrage de la caméra: ' + error.message, true);
+                socket.send(JSON.stringify({
+                    type: 'camera-error',
+                    error: error.message
+                }));
+            }
+        }
+
+        function stopStream() {
+            if (localStream) {
+                localStream.getTracks().forEach(track => track.stop());
+                localVideo.srcObject = null;
+                showMessage('Flux vidéo arrêté', false);
+                
+                if (peerConnection) {
+                    peerConnection.close();
+                    peerConnection = null;
+                }
+            }
+        }
+
+        socket.addEventListener('message', async (event) => {
+            const message = JSON.parse(event.data);
+            console.log('Message reçu:', message);
+
+            if (message.type === 'start-stream') {
+                await startStream();
+            } else if (message.type === 'stop-stream') {
+                stopStream();
+            } else if (message.type === 'webrtc-answer') {
+                await peerConnection.setRemoteDescription(new RTCSessionDescription(message.answer));
+            } else if (message.type === 'webrtc-ice-candidate') {
+                if (message.candidate && peerConnection) {
+                    await peerConnection.addIceCandidate(new RTCIceCandidate(message.candidate));
+                }
+            }
+        });
+    </script>
+</body>
+</html>
